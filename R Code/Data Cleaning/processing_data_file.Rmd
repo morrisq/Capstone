@@ -1,0 +1,33 @@
+---
+title: "Data Cleaning"
+author: "Quinn Morris"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+install.packages("R.matlab")
+install.packages("tidyr")
+```
+
+## Dataframe Setup
+Will require R.matlab package and needs the patient data, emm data and chanfrq means.
+
+```{r}
+library(R.matlab)
+patient_dat <- read.csv("./Data/1022_table.csv")
+chanfrq_means <- read.csv("./Data/chanfrq_means_10ths.csv")
+EMM_data <- read.csv("./Data/EMEM_Alpha_Theta_n49_noBLC_tenths_Long_withMetadata_outliers.csv") 
+```
+
+## Data Cleaning
+```{r}
+library(dplyr)
+
+# We will need to change a column name in the EMM Data from sendID too sentID
+colnames(EMM_data)[which(names(EMM_data) == "sendID")]  <- "sentID"
+
+# Remove X and X.1 columns from EMM Data. We use grepl to remove any columns starting with X
+EMM_data <- EMM_data[,!grepl("^X",names(EMM_data))]
+```
