@@ -7,27 +7,76 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-install.packages("R.matlab")
 install.packages("tidyr")
+install.packages("stringr")
+install.packages("tibble")
 ```
 
-## Dataframe Setup
-Will require R.matlab package and needs the patient data, emm data and chanfrq means.
-
+# Library Imports
 ```{r}
-library(R.matlab)
-patient_dat <- read.csv("./Data/1022_table.csv")
-chanfrq_means <- read.csv("./Data/chanfrq_means_10ths.csv")
-EMM_data <- read.csv("./Data/EMEM_Alpha_Theta_n49_noBLC_tenths_Long_withMetadata_outliers.csv") 
-```
-
-## Data Cleaning
-```{r}
+library(stringr)
+library(tibble)
 library(dplyr)
+```
+
+# Gather Patient Filenames
+This gets the file paths and the SIDS from the Data folder.
+```{r}
+data_folder <- "../Data/"
+filenames <- list.files(data_folder, full.names=TRUE)
+sid_files_full <- grep(pattern="[0-9]{4}_data\\.csv", filenames, value=TRUE)
+sids <- as.integer(str_extract(sid_files_full, "[0-9]{4}"))
+```
+
+# EMM File Data Cleaning
+This process aims to clean up the EMM Data file which contains all the response data relating to the patients.  
+```{r}
+
+# This file contains all the response data relating to the patients
+EMM_data <- read.csv("../Data/EMEM_Alpha_Theta_n49_noBLC_tenths_Long_withMetadata_outliers.csv") 
 
 # We will need to change a column name in the EMM Data from sendID too sentID
 colnames(EMM_data)[which(names(EMM_data) == "sendID")]  <- "sentID"
 
 # Remove X and X.1 columns from EMM Data. We use grepl to remove any columns starting with X
 EMM_data <- EMM_data[,!grepl("^X",names(EMM_data))]
+
+EMM_data <- select(EMM_data, sentID, sid, anyIU)
+```
+
+# Dataframe Join and Export
+Here we cycle through the sid_files_full vector, import each file, co-register the data with the EMM_data folder, and export the newly made file to a separate folder. All the steps above can be skipped if these files are generated already.
+
+```{r}
+output_folder <- "../Data/co-registered files/"
+
+for(pid in 1:length(sids)) {
+  patient_dat <- read.csv(sid_files_full[pid]) # Read in the appropriate patient data based on the sid.
+  x <- EMM_data %>% 
+    filter(sid == sids[pid]) # Filter the columns based on the appropriate sid
+  y <- aggregate(anyIU ~ sentID, data=x, FUN=mean) # Aggregate the anyIU per sentID. All we're looking for here is whether a person managed to generate an "idea unit" from the experience.
+  
+  out <- full_join(y, patient_dat, by="sentID") # I'll do a full join for now and export those. NA values will occur
+  out <- add_column(out, sid=sids[pid], .before=1) # Add the sid as a column for identification and later merging.
+  
+  output_name <- paste(output_folder, paste(sids[pid], "_coregistered.csv", sep=""), sep="") # Format the names
+  write.csv(out, output_name, row.names=TRUE)
+}
+```
+
+# One Coregistered File
+```{r} 
+coregistered_filenames <- list.files(output_folder, full.names=TRUE)
+coregistered_files_full <- grep(pattern="[0-9]{4}_coregistered\\.csv", filenames, value=TRUE)
+
+df <- data.frame(matrix(ncol=length(names(out)), nrow=0))
+colnames(df) <- names(out)
+
+for(f in 1:length(coregistered_files_full)) {
+  z <- read.csv(coregistered_filenames[f])
+  df <- bind_rows(df, z)
+}
+
+output_name <- paste(output_folder, "cumulative_coregistered.csv", sep="")
+write.csv(df, output_name, row.names=TRUE)
 ```
