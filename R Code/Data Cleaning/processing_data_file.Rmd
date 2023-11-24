@@ -58,7 +58,7 @@ for(pid in 1:length(sids)) {
   
   out <- full_join(y, patient_dat, by="sentID") # I'll do a full join for now and export those. NA values will occur
   out <- add_column(out, sid=sids[pid], .before=1) # Add the sid as a column for identification and later merging.
-  
+  out <- na.omit(out) # Omit any 
   output_name <- paste(output_folder, paste(sids[pid], "_coregistered.csv", sep=""), sep="") # Format the names
   write.csv(out, output_name, row.names=TRUE)
 }
@@ -67,7 +67,7 @@ for(pid in 1:length(sids)) {
 # One Coregistered File
 ```{r} 
 coregistered_filenames <- list.files(output_folder, full.names=TRUE)
-coregistered_files_full <- grep(pattern="[0-9]{4}_coregistered\\.csv", filenames, value=TRUE)
+coregistered_files_full <- grep(pattern="[0-9]{4}_coregistered\\.csv", coregistered_filenames, value=TRUE)
 
 df <- data.frame(matrix(ncol=length(names(out)), nrow=0))
 colnames(df) <- names(out)
