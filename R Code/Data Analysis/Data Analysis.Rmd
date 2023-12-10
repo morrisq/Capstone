@@ -1,0 +1,237 @@
+---
+title: "Untitled"
+author: "Quinn Morris"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Libraries
+```{r}
+library(FNN)
+library(dplyr)
+library(ggformula)
+
+library(pROC)
+library(FNN) # for comparison with KNN
+library(caTools)
+
+library(class)
+library(caret)
+library(car)
+```
+
+# Data Loading
+There's two ways to load in the data. The first is to load the files in via the cumulative co-registered data file. The other way is to load in all the labelled co-registered files themselves.
+```{r}
+data_dir <- "../Data/co-registered files/cumulative_coregistered.csv"
+cumco_df <- read.csv(data_dir) 
+cumco_df <- subset(cumco_df, select = -c(X, X.1, sentID))
+```
+
+## Data Subset Collection
+This is a way to grab specific columns (and rows) from the cumco_df dataset based on patient id, electrode number, frequency value, and timestamp.
+```{r}
+library(schoolmath)
+
+# This is a function that allows me to custom select columns based on their specific
+# quality that pertains to story id (SID), electrode, hertz, and timestamp
+get_cumco_subset <- function(dat, sid_=-1, e_=-1, hz_=-1, timestamp_=-1) {
+  df <- dat
+  
+  # If we're filtering by sid
+  if(sid_ != -1) {
+    df <- df %>% filter(sid == sid_)
+  }
+  
+  # Create logical vector for columns/variables to select
+  selected_cols <- vector(length=dim(df)[2]) | TRUE # default is true
+  
+  # Selecting columns by electrode number
+  if(e_ != -1) {
+    e_num <- paste("e", as.integer(e_), "_", sep="")
+    selected_cols <- selected_cols & grepl(e_num, colnames(df))
+  }
+  
+  if(hz_ != -1) {
+    hz_num <- "2Hz" # 2 by default
+    if(is.decimal(hz_)) {
+      hz_int <- floor(hz_)
+      hz_dec <- floor((hz_int %% 1)*10)
+      hz_num <- paste("_", hz_int, "pt", hz_dec, "Hz", sep="")
+    }
+    else {
+      hz_num <- paste("_", hz_, "Hz", sep="")
+    }
+    
+    print(hz_num)
+    selected_cols <- selected_cols & grepl(hz_num, colnames(df))
+  }
+    
+  if(timestamp_ != -1) {
+    # Grab column indexes that fulfill timestamp criteria
+    t_num <- paste("s", timestamp_, "\\b", sep="")
+    selected_cols <- selected_cols & grepl(t_num, colnames(df)) 
+  }
+  
+  selected_cols[1:2] <- TRUE
+  
+  df <- df[, as.logical(selected_cols)]
+  
+  return(df)
+}
+
+ex <- get_cumco_subset(cumco_df, sid_=1022, timestamp_=1)
+ex$anyIU <- as.factor(ex$anyIU)
+```
+
+# Model Selection and Creation
+## K Nearest Neighbors
+```{r}
+# Helper packages
+library(dplyr)      # for data wrangling
+library(ggplot2)    # for awesome graphics
+library(rsample)    # for creating validation splits
+library(recipes)    # for feature engineering
+
+# Modeling packages
+library(caret)       # for fitting KNN models
+
+set.seed(123)
+
+if("sid" %in% names(ex))
+  ex <- ex[, -which("sid" %in% names(ex))]
+
+split <- sample.split(ex$anyIU, SplitRatio = 0.7)
+train <- subset(ex, split == TRUE)
+test <- subset(ex, split == FALSE)
+
+levels(train$anyIU) <- c("N", "Y")
+levels(test$anyIU) <- c("N", "Y")
+
+# norm_func <- function(x) {(x - min(x))/(max(x) - min(x))}
+# train_scaled <- scale(train[-c(1,2)])
+# test_scaled <- scale(test[-c(1,2)])
+
+blueprint <- train %>%
+  recipe(anyIU ~ .) %>%
+  step_dummy(all_nominal(), -all_outcomes(), one_hot = TRUE) %>%
+  step_center(all_numeric(), -all_outcomes()) %>%
+  step_scale(all_numeric(), -all_outcomes())
+
+cv <- trainControl(
+  method="repeatedcv",
+  number=10,
+  repeats=5,
+  classProbs=TRUE,
+  summaryFunction=twoClassSummary)
+
+hyper_grid <- expand.grid(
+  k = floor(seq(1, nrow(train)/3, length.out = 20))
+)
+
+knn_grid <- train(
+  blueprint,
+  data=train,
+  method="knn",
+  trControl=cv,
+  tuneGrid=hyper_grid,
+  metric="ROC"
+)
+
+ggplot(knn_grid)
+
+# acc_vals <- vector(mode="numeric", length=30) 
+# for(k_val in 1:length(acc_vals)) {
+#   test_pred <- knn(train = train_scaled, test = test_scaled, cl = train$anyIU, k=k_val)
+#   actual <- test$anyIU
+#   cm <- table(actual, test_pred)
+#   
+#   accuracy <- sum(diag(cm))/length(actual)
+#   acc_vals <- append(acc_vals, accuracy)
+#   # sprintf("Accuracy: %.2f%%", accuracy*100)
+# }
+# temp <- data.frame(1:length(acc_vals), acc_vals)
+# names(temp) <- c("k", "Accuracy")
+# plot(temp)
+
+```
+
+
+
+## KMeans
+```{r}
+set.seed(456)
+
+ex_scaled <- scale(ex[-c(1,2)])
+
+split <- sample.split(ex$anyIU, SplitRatio = 0.7)
+train <- subset(ex, split == TRUE)
+test <- subset(ex, split == FALSE)
+
+train_scaled <- scale(train[-c(1,2,3)])
+test_scaled <- scale(test[-c(1,2,3)])
+km.res <- kmeans(cumco_scaled, 4, nstart=25)
+
+agg_mean <- aggregate(cumco_scaled, by=list(cluster=km.res$cluster), mean)
+dd <- cbind(ex, cluster=km.res$cluster)
+dd <- dd %>% relocate(cluster)
+```
+
+
+## PCA
+```{r}
+library(corrr)
+library(corrplot)
+library(ggcorrplot)
+library(FactoMineR)
+
+# Normalizing Data
+ex_norm <- scale(ex[-c(1,2)]) #Remove sid and anyIU columns and scale remaining data
+
+corr_reduce <- function(dat, sig) {
+  corr <- cor(dat) #run a correlation and drop the insignificant ones
+  corr[lower.tri(corr,diag=TRUE)] <- NA #prepare to drop duplicates and correlations of 1
+  corr[corr == 1] <- NA #drop perfect correlations
+  
+  corr <- as.data.frame(as.table(corr)) #turn into a 3-column table
+  corr <- na.omit(corr) #remove the NA values from above 
+  corr <- subset(corr, abs(Freq) > sig) #select significant values
+  corr <- corr[order(-abs(corr$Freq)),] #sort by highest correlation
+  print(corr) #print table
+  
+  #turn corr back into matrix in order to plot with corrplot
+  mtx_corr <- reshape2::acast(corr, Var1~Var2, value.var="Freq")
+  
+  #plot correlations visually
+  corrplot(mtx_corr, is.corr=FALSE, tl.col="black", na.label=" ")
+}
+
+x <- corr_reduce(ex_norm, 0.9)
+
+# Run correlation, drop insignificant correlations
+# corr_matrix <- cor(ex_norm)
+# 
+# corr_matrix[lower.tri(corr_matrix, diag=TRUE)] <- NA
+# corr_matrix[corr == 1] <- NA
+# 
+# corr_matrix <- as.data.frame(as.table(corr_matrix))
+# corr_matrix <- na.omit(corr_matrix)
+# 
+# corr_matrix <- subset(corr_matrix, abs(Freq) > 0.5) #select significant values  
+# corr_matrix <- corr_matrix[order(-abs(corr_matrix$Freq)),] #sort by highest correlation
+# print(corr_matrix) #print table
+# 
+# mtx_corr <- reshape2::acast(corr_matrix, Var1~Var2, value.var="Freq") #turn corr back into matrix in order to plot with corrplot
+# corrplot(mtx_corr, is.corr=FALSE, tl.col="black", na.label=" ")
+
+
+# ggcorrplot(corr_matrix)
+
+# data.pca <- princomp(corr_matrix)
+# summary(data.pca)
+```
+
