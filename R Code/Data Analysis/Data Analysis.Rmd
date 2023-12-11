@@ -21,7 +21,9 @@ library(caTools)
 
 library(class)
 library(caret)
+
 library(car)
+library(corrplot)
 ```
 
 # Data Loading
@@ -88,6 +90,23 @@ ex <- get_cumco_subset(cumco_df, sid_=1022, timestamp_=1)
 ex$anyIU <- as.factor(ex$anyIU)
 ```
 
+## Covariance
+```{r}
+library(ggplot2)
+
+ex_scaled <- scale(ex[-c(1,2)])
+ex_scaled <- ex[-c(1,2)]**2
+ex_scaled <- cbind(ex[c(1,2)], ex_scaled)
+
+for (col in 3:ncol(ex)) {
+    hist <- hist(ex[,col], plot = FALSE)
+    histScaled <- hist(ex_scaled[,col], plot = FALSE) 
+    
+    plot(hist, col="lightblue", main=colnames(ex[col]), xlab="Hz")
+    plot(histScaled, col="lightpink", add=TRUE)
+}
+```
+
 # Model Selection and Creation
 ## K Nearest Neighbors
 ```{r}
@@ -141,46 +160,60 @@ knn_grid <- train(
   tuneGrid=hyper_grid,
   metric="ROC"
 )
-
-ggplot(knn_grid)
-
-# acc_vals <- vector(mode="numeric", length=30) 
-# for(k_val in 1:length(acc_vals)) {
-#   test_pred <- knn(train = train_scaled, test = test_scaled, cl = train$anyIU, k=k_val)
-#   actual <- test$anyIU
-#   cm <- table(actual, test_pred)
-#   
-#   accuracy <- sum(diag(cm))/length(actual)
-#   acc_vals <- append(acc_vals, accuracy)
-#   # sprintf("Accuracy: %.2f%%", accuracy*100)
-# }
-# temp <- data.frame(1:length(acc_vals), acc_vals)
-# names(temp) <- c("k", "Accuracy")
-# plot(temp)
-
 ```
 
+```{r}
+ggplot(knn_grid)
+```
 
+```{r}
+
+```
 
 ## KMeans
 ```{r}
 set.seed(456)
 
-ex_scaled <- scale(ex[-c(1,2)])
+# Decide how many clusters to look at
+n_clusters <- 20
 
-split <- sample.split(ex$anyIU, SplitRatio = 0.7)
-train <- subset(ex, split == TRUE)
-test <- subset(ex, split == FALSE)
+# Initialize total within sum of squares error: wss
+wss <- numeric(n_clusters)
 
-train_scaled <- scale(train[-c(1,2,3)])
-test_scaled <- scale(test[-c(1,2,3)])
-km.res <- kmeans(cumco_scaled, 4, nstart=25)
+# Look over 1 to n possible clusters
+for (i in 1:n_clusters) {
+  # Fit the model: km.out
+  km.out <- kmeans(ex_scaled, centers = i, nstart = 20)
+  # Save the within cluster sum of squares
+  wss[i] <- km.out$tot.withinss
+}
 
-agg_mean <- aggregate(cumco_scaled, by=list(cluster=km.res$cluster), mean)
-dd <- cbind(ex, cluster=km.res$cluster)
-dd <- dd %>% relocate(cluster)
+# Produce a scree plot
+wss_df <- tibble(clusters = 1:n_clusters, wss = wss)
+ 
+scree_plot <- ggplot(wss_df, aes(x = clusters, y = wss, group = 1)) +
+    geom_point(size = 4)+
+    geom_line() +
+    scale_x_continuous(breaks = c(2, 4, 6, 8, 10)) +
+    xlab('Number of clusters')
+
+scree_plot + 
+  geom_hline(
+      yintercept = wss, 
+      linetype = 'dashed'
+  )
 ```
 
+```{r}
+
+# 8 clusters seems to be the limit
+k <- 8
+km.out <- kmeans(ex_scaled, centers = k, nstart = 20)
+
+agg_mean <- aggregate(ex_scaled, by=list(cluster=km.out$cluster), mean)
+ex_scaled <- cbind(ex_scaled, cluster=km.out$cluster)
+ex_scaled <- as.data.frame(ex_scaled) %>% relocate(cluster)
+```
 
 ## PCA
 ```{r}
