@@ -1,0 +1,260 @@
+---
+title: "Untitled"
+author: "Quinn Morris"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Libraries
+```{r}
+library(FNN)
+library(dplyr)
+library(ggformula)
+
+library(pROC)
+library(FNN) # for comparison with KNN
+library(caTools)
+
+library(class)
+library(caret)
+
+library(car)
+library(corrplot)
+
+rm(list=ls())
+```
+
+# Data Loading
+There's two ways to load in the data. The first is to load the files in via the cumulative co-registered data file. The other way is to load in all the labelled co-registered files themselves.
+```{r}
+data_dir <- "../Data/co-registered files/cumulative_coregistered.csv"
+cumco_df <- read.csv(data_dir) 
+cumco_df <- subset(cumco_df, select = -c(X, X.1, sentID))
+```
+
+## Data Subset Collection
+This is a way to grab specific columns (and rows) from the cumco_df dataset based on patient id, electrode number, frequency value, and timestamp.
+```{r}
+library(schoolmath)
+
+# This is a function that allows me to custom select columns based on their specific
+# quality that pertains to story id (SID), electrode, hertz, and timestamp
+get_cumco_subset <- function(dat, sid_=-1, e_=-1, hz_=-1, timestamp_=-1) {
+  df <- dat
+  
+  # If we're filtering by sid
+  if(sid_ != -1) {
+    df <- df %>% filter(sid == sid_)
+  }
+  
+  # Create logical vector for columns/variables to select
+  selected_cols <- vector(length=dim(df)[2]) | TRUE # default is true
+  
+  # Selecting columns by electrode number
+  if(e_ != -1) {
+    e_num <- paste("e", as.integer(e_), "_", sep="")
+    selected_cols <- selected_cols & grepl(e_num, colnames(df))
+  }
+  
+  if(hz_ != -1) {
+    hz_num <- "2Hz" # 2 by default
+    if(is.decimal(hz_)) {
+      hz_int <- floor(hz_)
+      hz_dec <- floor((hz_int %% 1)*10)
+      hz_num <- paste("_", hz_int, "pt", hz_dec, "Hz", sep="")
+    }
+    else {
+      hz_num <- paste("_", hz_, "Hz", sep="")
+    }
+    
+    # print(hz_num)
+    selected_cols <- selected_cols & grepl(hz_num, colnames(df))
+  }
+    
+  if(timestamp_ != -1) {
+    # Grab column indexes that fulfill timestamp criteria
+    t_num <- paste("s", timestamp_, "\\b", sep="")
+    selected_cols <- selected_cols & grepl(t_num, colnames(df)) 
+  }
+  
+  selected_cols[1:2] <- TRUE
+  
+  df <- df[, as.logical(selected_cols)]
+  
+  return(df)
+}
+```
+
+### Grab subset of data by SID, Electrode, Hertz Value and/or Timestamp
+```{r}
+ex <- get_cumco_subset(cumco_df, sid_=1022, hz_=2, timestamp_=1)
+ex$anyIU <- as.factor(ex$anyIU)
+```
+
+## Spread
+```{r}
+library(ggplot2)
+
+ex_scaled <- scale(ex[-c(1,2)])
+# ex_scaled <- ex[-c(1,2)]**2
+ex_scaled <- cbind(ex[c(1,2)], ex_scaled)
+
+for (col in 3:ncol(ex)) {
+    hist <- hist(ex[,col], plot = FALSE)
+    histScaled <- hist(ex_scaled[,col], plot = FALSE)
+
+    plot(hist, col="lightblue", main=colnames(ex[col]), xlab="Hz")
+    plot(histScaled, col="lightpink", add=TRUE)
+}
+```
+
+# Model Selection and Creation
+## PCA
+```{r}
+library(corrr)
+library(ggcorrplot)
+library(FactoMineR)
+library(factoextra)
+
+pca_threshold <- 0.9
+```
+
+### Checking for Varience and Collinearity
+```{r}
+corr_matrix <- cor(ex_scaled[,-c(1,2)]) 
+corr_matrix
+ggcorrplot(corr_matrix)
+
+data.pca <- princomp(corr_matrix)
+fviz_eig(data.pca, addLabels=TRUE)
+# summary(data.pca)
+# Calculate the index of the cumulative proportion of variance
+get_num_vars_needed <- function(cum_pov_vec, threshold=0.9) {
+  cum_prop <- 0.0
+  index <- 1
+  for(i in 1:length(cum_pov_vec)) {
+    cum_prop <- cum_prop + cum_pov_vec[i]
+    if(cum_prop <= threshold) {
+      index <- i
+    }
+  }
+  
+  return(index+1)
+}
+cum_pov <- data.pca$sdev^2/sum(data.pca$sdev^2)
+var_num <- get_num_vars_needed(cum_pov,pca_threshold)
+```
+
+
+### Retrying PCA
+```{r}
+# Reduce dimensionality
+ex_pca <- ex_scaled[, 1:(var_num+2)] # Add +2 for sid and anyIU columns
+corr_matrix <- cor(ex_pca[,-c(1,2)]) 
+corr_matrix
+ggcorrplot(corr_matrix)
+
+data.pca <- princomp(corr_matrix)
+fviz_eig(data.pca, addLabels=TRUE)
+```
+
+
+## KMeans
+```{r}
+scree_threshold <- 0.05
+```
+
+### WCSS Minimization
+```{r}
+set.seed(2023)
+
+# Decide how many clusters to look at
+n_clusters <- 20
+
+# Initialize total within sum of squares error: wss
+wss <- numeric(n_clusters)
+
+# Look over 1 to n possible clusters
+for (i in 1:n_clusters) {
+  # Fit the model: km.out
+  km.out <- kmeans(ex_pca[,-c(1,2)], centers = i, nstart = 20)
+  # Save the within cluster sum of squares
+  wss[i] <- km.out$tot.withinss
+}
+
+# Produce a scree plot
+wss_df <- tibble(clusters = 1:n_clusters, wss = wss)
+
+get_cluster_with_least_change <- function(wss_, threshold = 0.05) {
+  index <- 1
+  for(i in 1:(length(wss_) - 1)) {
+    vel <- (wss_[i] - wss_[i+1]) / max(wss_[i+1], wss_[i])
+    if(vel <= threshold) {
+      index <- i
+      return(index)
+    }
+  }
+}
+
+k <- get_cluster_with_least_change(wss_df$wss, scree_threshold)
+
+scree_plot <- ggplot(wss_df, aes(x = clusters, y = wss, group = 1)) +
+    geom_point(size = 4)+
+    geom_line() +
+    scale_x_continuous() +
+    xlab('Number of clusters')
+
+scree_plot + 
+  geom_hline(
+      yintercept = wss, 
+      linetype = 'dashed'
+  )
+```
+
+## KMeans Optimization
+```{r}
+# 8 clusters seems to be the limit for WCSS
+km.out <- kmeans(ex_pca, centers = k, nstart = 20)
+
+agg_mean <- aggregate(ex_pca, by=list(cluster=km.out$cluster), mean)
+ex_pca <- cbind(ex_pca, cluster=km.out$cluster)
+ex_pca <- as.data.frame(ex_pca) %>% relocate(cluster)
+```
+
+## Bootstrapping
+```{r}
+library(fpc)
+km.boot <- clusterboot(ex_pca[, -c(1,2,3)], B=1000, bootmethod = "boot", clustermethod=kmeansCBI, krange=k, seed=123)
+ex_boot <- ex_pca[,-1]
+ex_boot <- cbind(ex_boot, cluster=km.boot$result$partition)
+ex_boot <- as.data.frame(ex_boot) %>% relocate(cluster)
+
+# Initialize total within sum of squares error: wss
+wss <- numeric(k)
+
+# Look over 1 to n possible clusters
+for (i in 1:k) {
+  # Save the within cluster sum of squares
+  wss[i] <- km.boot$result$resul$withinss[i]
+}
+
+# Produce a scree plot
+wss_df <- tibble(clusters = 1:k, wss = wss)
+k <- get_cluster_with_least_change(wss_df$wss, scree_threshold)
+
+scree_plot <- ggplot(wss_df, aes(x = clusters, y = wss, group = 1)) +
+    geom_point(size = 4)+
+    geom_line() +
+    scale_x_continuous() +
+    xlab('Number of clusters')
+
+scree_plot + 
+  geom_hline(
+      yintercept = wss, 
+      linetype = 'dashed'
+  )
+```
