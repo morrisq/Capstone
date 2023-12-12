@@ -24,6 +24,8 @@ library(caret)
 
 library(car)
 library(corrplot)
+
+rm(list=ls())
 ```
 
 # Data Loading
@@ -69,7 +71,7 @@ get_cumco_subset <- function(dat, sid_=-1, e_=-1, hz_=-1, timestamp_=-1) {
       hz_num <- paste("_", hz_, "Hz", sep="")
     }
     
-    print(hz_num)
+    # print(hz_num)
     selected_cols <- selected_cols & grepl(hz_num, colnames(df))
   }
     
@@ -85,94 +87,90 @@ get_cumco_subset <- function(dat, sid_=-1, e_=-1, hz_=-1, timestamp_=-1) {
   
   return(df)
 }
+```
 
-ex <- get_cumco_subset(cumco_df, sid_=1022, timestamp_=1)
+### Grab subset of data by SID, Electrode, Hertz Value and/or Timestamp
+```{r}
+ex <- get_cumco_subset(cumco_df, sid_=1022, hz_=2, timestamp_=1)
 ex$anyIU <- as.factor(ex$anyIU)
 ```
 
-## Covariance
+## Spread
 ```{r}
 library(ggplot2)
 
 ex_scaled <- scale(ex[-c(1,2)])
-ex_scaled <- ex[-c(1,2)]**2
+# ex_scaled <- ex[-c(1,2)]**2
 ex_scaled <- cbind(ex[c(1,2)], ex_scaled)
 
 for (col in 3:ncol(ex)) {
     hist <- hist(ex[,col], plot = FALSE)
-    histScaled <- hist(ex_scaled[,col], plot = FALSE) 
-    
+    histScaled <- hist(ex_scaled[,col], plot = FALSE)
+
     plot(hist, col="lightblue", main=colnames(ex[col]), xlab="Hz")
     plot(histScaled, col="lightpink", add=TRUE)
 }
 ```
 
 # Model Selection and Creation
-## K Nearest Neighbors
+## PCA
 ```{r}
-# Helper packages
-library(dplyr)      # for data wrangling
-library(ggplot2)    # for awesome graphics
-library(rsample)    # for creating validation splits
-library(recipes)    # for feature engineering
+library(corrr)
+library(ggcorrplot)
+library(FactoMineR)
+library(factoextra)
 
-# Modeling packages
-library(caret)       # for fitting KNN models
-
-set.seed(123)
-
-if("sid" %in% names(ex))
-  ex <- ex[, -which("sid" %in% names(ex))]
-
-split <- sample.split(ex$anyIU, SplitRatio = 0.7)
-train <- subset(ex, split == TRUE)
-test <- subset(ex, split == FALSE)
-
-levels(train$anyIU) <- c("N", "Y")
-levels(test$anyIU) <- c("N", "Y")
-
-# norm_func <- function(x) {(x - min(x))/(max(x) - min(x))}
-# train_scaled <- scale(train[-c(1,2)])
-# test_scaled <- scale(test[-c(1,2)])
-
-blueprint <- train %>%
-  recipe(anyIU ~ .) %>%
-  step_dummy(all_nominal(), -all_outcomes(), one_hot = TRUE) %>%
-  step_center(all_numeric(), -all_outcomes()) %>%
-  step_scale(all_numeric(), -all_outcomes())
-
-cv <- trainControl(
-  method="repeatedcv",
-  number=10,
-  repeats=5,
-  classProbs=TRUE,
-  summaryFunction=twoClassSummary)
-
-hyper_grid <- expand.grid(
-  k = floor(seq(1, nrow(train)/3, length.out = 20))
-)
-
-knn_grid <- train(
-  blueprint,
-  data=train,
-  method="knn",
-  trControl=cv,
-  tuneGrid=hyper_grid,
-  metric="ROC"
-)
+pca_threshold <- 0.9
 ```
 
+### Checking for Varience and Collinearity
 ```{r}
-ggplot(knn_grid)
+corr_matrix <- cor(ex_scaled[,-c(1,2)]) 
+corr_matrix
+ggcorrplot(corr_matrix)
+
+data.pca <- princomp(corr_matrix)
+fviz_eig(data.pca, addLabels=TRUE)
+# summary(data.pca)
+# Calculate the index of the cumulative proportion of variance
+get_num_vars_needed <- function(cum_pov_vec, threshold=0.9) {
+  cum_prop <- 0.0
+  index <- 1
+  for(i in 1:length(cum_pov_vec)) {
+    cum_prop <- cum_prop + cum_pov_vec[i]
+    if(cum_prop <= threshold) {
+      index <- i
+    }
+  }
+  
+  return(index+1)
+}
+cum_pov <- data.pca$sdev^2/sum(data.pca$sdev^2)
+var_num <- get_num_vars_needed(cum_pov,pca_threshold)
 ```
 
-```{r}
 
+### Retrying PCA
+```{r}
+# Reduce dimensionality
+ex_pca <- ex_scaled[, 1:(var_num+2)] # Add +2 for sid and anyIU columns
+corr_matrix <- cor(ex_pca[,-c(1,2)]) 
+corr_matrix
+ggcorrplot(corr_matrix)
+
+data.pca <- princomp(corr_matrix)
+fviz_eig(data.pca, addLabels=TRUE)
 ```
+
 
 ## KMeans
 ```{r}
-set.seed(456)
+scree_threshold <- 0.05
+```
+
+### WCSS Minimization
+```{r}
+set.seed(2023)
 
 # Decide how many clusters to look at
 n_clusters <- 20
@@ -183,18 +181,31 @@ wss <- numeric(n_clusters)
 # Look over 1 to n possible clusters
 for (i in 1:n_clusters) {
   # Fit the model: km.out
-  km.out <- kmeans(ex_scaled, centers = i, nstart = 20)
+  km.out <- kmeans(ex_pca[,-c(1,2)], centers = i, nstart = 20)
   # Save the within cluster sum of squares
   wss[i] <- km.out$tot.withinss
 }
 
 # Produce a scree plot
 wss_df <- tibble(clusters = 1:n_clusters, wss = wss)
- 
+
+get_cluster_with_least_change <- function(wss_, threshold = 0.05) {
+  index <- 1
+  for(i in 1:(length(wss_) - 1)) {
+    vel <- (wss_[i] - wss_[i+1]) / max(wss_[i+1], wss_[i])
+    if(vel <= threshold) {
+      index <- i
+      return(index)
+    }
+  }
+}
+
+k <- get_cluster_with_least_change(wss_df$wss, scree_threshold)
+
 scree_plot <- ggplot(wss_df, aes(x = clusters, y = wss, group = 1)) +
     geom_point(size = 4)+
     geom_line() +
-    scale_x_continuous(breaks = c(2, 4, 6, 8, 10)) +
+    scale_x_continuous() +
     xlab('Number of clusters')
 
 scree_plot + 
@@ -204,67 +215,46 @@ scree_plot +
   )
 ```
 
+## KMeans Optimization
 ```{r}
+# 8 clusters seems to be the limit for WCSS
+km.out <- kmeans(ex_pca, centers = k, nstart = 20)
 
-# 8 clusters seems to be the limit
-k <- 8
-km.out <- kmeans(ex_scaled, centers = k, nstart = 20)
-
-agg_mean <- aggregate(ex_scaled, by=list(cluster=km.out$cluster), mean)
-ex_scaled <- cbind(ex_scaled, cluster=km.out$cluster)
-ex_scaled <- as.data.frame(ex_scaled) %>% relocate(cluster)
+agg_mean <- aggregate(ex_pca, by=list(cluster=km.out$cluster), mean)
+ex_pca <- cbind(ex_pca, cluster=km.out$cluster)
+ex_pca <- as.data.frame(ex_pca) %>% relocate(cluster)
 ```
 
-## PCA
+## Bootstrapping
 ```{r}
-library(corrr)
-library(corrplot)
-library(ggcorrplot)
-library(FactoMineR)
+library(fpc)
+km.boot <- clusterboot(ex_pca[, -c(1,2,3)], B=1000, bootmethod = "boot", clustermethod=kmeansCBI, krange=k, seed=123)
+ex_boot <- ex_pca[,-1]
+ex_boot <- cbind(ex_boot, cluster=km.boot$result$partition)
+ex_boot <- as.data.frame(ex_boot) %>% relocate(cluster)
 
-# Normalizing Data
-ex_norm <- scale(ex[-c(1,2)]) #Remove sid and anyIU columns and scale remaining data
+# Initialize total within sum of squares error: wss
+wss <- numeric(k)
 
-corr_reduce <- function(dat, sig) {
-  corr <- cor(dat) #run a correlation and drop the insignificant ones
-  corr[lower.tri(corr,diag=TRUE)] <- NA #prepare to drop duplicates and correlations of 1
-  corr[corr == 1] <- NA #drop perfect correlations
-  
-  corr <- as.data.frame(as.table(corr)) #turn into a 3-column table
-  corr <- na.omit(corr) #remove the NA values from above 
-  corr <- subset(corr, abs(Freq) > sig) #select significant values
-  corr <- corr[order(-abs(corr$Freq)),] #sort by highest correlation
-  print(corr) #print table
-  
-  #turn corr back into matrix in order to plot with corrplot
-  mtx_corr <- reshape2::acast(corr, Var1~Var2, value.var="Freq")
-  
-  #plot correlations visually
-  corrplot(mtx_corr, is.corr=FALSE, tl.col="black", na.label=" ")
+# Look over 1 to n possible clusters
+for (i in 1:k) {
+  # Save the within cluster sum of squares
+  wss[i] <- km.boot$result$resul$withinss[i]
 }
 
-x <- corr_reduce(ex_norm, 0.9)
+# Produce a scree plot
+wss_df <- tibble(clusters = 1:k, wss = wss)
+k <- get_cluster_with_least_change(wss_df$wss, scree_threshold)
 
-# Run correlation, drop insignificant correlations
-# corr_matrix <- cor(ex_norm)
-# 
-# corr_matrix[lower.tri(corr_matrix, diag=TRUE)] <- NA
-# corr_matrix[corr == 1] <- NA
-# 
-# corr_matrix <- as.data.frame(as.table(corr_matrix))
-# corr_matrix <- na.omit(corr_matrix)
-# 
-# corr_matrix <- subset(corr_matrix, abs(Freq) > 0.5) #select significant values  
-# corr_matrix <- corr_matrix[order(-abs(corr_matrix$Freq)),] #sort by highest correlation
-# print(corr_matrix) #print table
-# 
-# mtx_corr <- reshape2::acast(corr_matrix, Var1~Var2, value.var="Freq") #turn corr back into matrix in order to plot with corrplot
-# corrplot(mtx_corr, is.corr=FALSE, tl.col="black", na.label=" ")
+scree_plot <- ggplot(wss_df, aes(x = clusters, y = wss, group = 1)) +
+    geom_point(size = 4)+
+    geom_line() +
+    scale_x_continuous() +
+    xlab('Number of clusters')
 
-
-# ggcorrplot(corr_matrix)
-
-# data.pca <- princomp(corr_matrix)
-# summary(data.pca)
+scree_plot + 
+  geom_hline(
+      yintercept = wss, 
+      linetype = 'dashed'
+  )
 ```
-
